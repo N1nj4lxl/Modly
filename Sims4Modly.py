@@ -1415,6 +1415,22 @@ class Sims4ModSorterApp(tk.Tk):
         # internal flag
         self._settings_open = False
 
+        # events
+        self.tree.bind("<<TreeviewSelect>>", self.on_select)
+        self.tree.bind("<Double-1>", self.on_double_click)
+        self.bind("<Configure>", self._on_resize, add="+")  # auto-size only until user resizes
+
+        # detect header drag → freeze widths and persist immediately
+        def _on_header_release(ev):
+            if self.tree.identify_region(ev.x, ev.y) in ("separator", "heading"):
+                self._respect_user_widths = True
+                col_widths = {c: int(self.tree.column(c)["width"]) for c in COLUMNS}
+                s = load_settings()
+                s["col_widths"] = col_widths
+                save_settings(s)
+
+        self.tree.bind("<ButtonRelease-1>", _on_header_release, add="+")
+
     def _build_collision_overlay(self):
         self._col_overlay = tk.Frame(self, bg=self._theme_cache["sel"])
         self._col_overlay.place_forget()
@@ -2022,5 +2038,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# 78366
