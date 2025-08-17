@@ -12,8 +12,13 @@ from tkinter import ttk, filedialog, messagebox
 
 # local config/data (split out)
 from modly.config import (
-    THEMES, COLUMNS, HEADERS, CATEGORY_ORDER, DEFAULT_FOLDER_MAP,
-    _CANON, COLLIDING_DIR_NAME,
+    # user-tweakable settings & constants
+    THEMES, COLUMNS, HEADERS, CATEGORY_ORDER, DEFAULT_FOLDER_MAP, _CANON,
+    COLLIDING_DIR_NAME, NORMALISE_DIRS,
+    MAX_TOPLEVEL_FOLDERS, MAX_SUBFOLDERS_PER_TOPLEVEL,
+    RECURSE_DEFAULT, IGNORE_EXTENSIONS_DEFAULT, IGNORE_NAME_CONTAINS_DEFAULT,
+    DEFAULT_THEME_NAME, INITIAL_GEOMETRY, LOG_AUTOSCROLL_DEFAULT,
+    DEFAULT_COLUMN_WIDTHS, SCRIPT_EXTS, ARCHIVE_EXTS,
 )
 from modly.keywords_loader import load_keywords
 
@@ -32,35 +37,29 @@ _KW = sorted(_KEYWORDS, key=lambda kv: (-len(kv[0]), kv[0]))
 # --- Small, shared helpers (used across sections) ----------------------------
 
 def load_settings() -> dict[str, Any]:
-    """Read JSON settings; fallback to sane defaults."""
     try:
         with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
-            if not isinstance(cfg, dict):
-                return {}
-            return cfg
+            return cfg if isinstance(cfg, dict) else {}
     except Exception:
         return {}
 
 def save_settings(cfg: dict[str, Any]) -> None:
-    """Write JSON settings atomically."""
     try:
         tmp = SETTINGS_PATH.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
         tmp.replace(SETTINGS_PATH)
     except Exception:
-        pass  # don’t crash UI on settings write issues
+        pass
 
 def ensure_folder(p: str | Path) -> None:
-    """Create a folder if missing."""
     try:
         Path(p).mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
 
 def _unique_path(dst: str) -> str:
-    """Return a unique path by appending (n) before extension."""
     base, ext = os.path.splitext(dst)
     n, res = 1, dst
     while os.path.exists(res):
@@ -69,11 +68,9 @@ def _unique_path(dst: str) -> str:
     return res
 
 def _uniq_name_in(folder: str, filename: str) -> str:
-    """Unique name within folder."""
     return _unique_path(os.path.join(folder, filename))
 
 def save_moves_log(mods_root: str, ops: list[dict[str, str]]) -> None:
-    """Append move operations to a JSON log in Mods root (used by Undo)."""
     try:
         log_path = os.path.join(mods_root, MOVES_LOG_NAME)
         data: list[dict[str, Any]] = []
@@ -86,14 +83,12 @@ def save_moves_log(mods_root: str, ops: list[dict[str, str]]) -> None:
     except Exception:
         pass
 
-# --- Keyword + category utilities -------------------------------------------
+# --- Keyword helpers / canon -------------------------------------------------
 
 def _canon(cat: str) -> str:
-    """Map loose/sub categories to your canonical buckets."""
     return _CANON.get(cat.lower().strip(), cat)
 
 def _norm_ignore_exts(raw: str) -> set[str]:
-    """Normalise a comma/space list of extensions into {'.ext', ...}."""
     out: set[str] = set()
     for tok in re.split(r"[,\s]+", raw or ""):
         t = tok.strip().lower()
@@ -105,16 +100,15 @@ def _norm_ignore_exts(raw: str) -> set[str]:
     return out
 
 def _norm_ignore_names(raw: str) -> set[str]:
-    """Normalise a comma/space list of name substrings to lowercase."""
     return {t.strip().lower() for t in re.split(r"[,\s]+", raw or "") if t.strip()}
 
-# --- Name prettifier (UI only; doesn’t change files on disk) ----------------
+# --- Name prettifier (UI only) ----------------------------------------------
 _CAMEL_SPLIT_RE = re.compile(
     r"""
-    (?<=[A-Za-z])(?=[A-Z][a-z])   |  # TitleCase boundary
-    (?<=[a-z])(?=[A-Z])           |  # lower→UPPER
-    (?<=[A-Za-z])(?=\d)           |  # letter→digit
-    (?<=\d)(?=[A-Za-z])              # digit→letter
+    (?<=[A-Za-z])(?=[A-Z][a-z])   |
+    (?<=[a-z])(?=[A-Z])           |
+    (?<=[A-Za-z])(?=\d)           |
+    (?<=\d)(?=[A-Za-z])
     """, re.X
 )
 
@@ -124,19 +118,13 @@ def _humanize_stem(stem: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 def prettify_for_ui(name: str) -> str:
-    """'WerewolfCondomWrapper.package' → 'Werewolf Condom Wrapper.package'."""
     base, ext = os.path.splitext(name)
     return f"{_humanize_stem(base)}{ext}"
 
-# --- File date heuristic (used by collision handling) -----------------------
+# --- File date heuristic (collisions) ---------------------------------------
 def best_date_for_file(path: str) -> tuple[float, str]:
-    """
-    Return (timestamp, source). Uses mtime, then ctime; 0.0 if unknown.
-    Note: ZIP internals handled elsewhere when scanning archives.
-    """
     try:
         st = os.stat(path)
-        # Prefer modification time; on some FS ctime is metadata change, not creation.
         return (float(getattr(st, "st_mtime", 0.0)) or 0.0, "mtime")
     except Exception:
         return (0.0, "unknown")
@@ -186,14 +174,10 @@ def _flatten_notes(notes: str | list[str] | None) -> str:
         return ""
 
 def guess_type_for_name(name: str, ext: str) -> tuple[str, float, str]:
-    """
-    Length-aware keyword detector with extension shortcuts.
-    Returns (category, confidence, reason).
-    """
     n = name.lower()
-    if ext == ".ts4script":
+    if ext in SCRIPT_EXTS:
         return ("Script Mod", 0.95, "by extension")
-    if ext in (".zip", ".rar", ".7z"):
+    if ext in ARCHIVE_EXTS:
         return ("Archive", 0.70, "archive")
 
     for kw, cat in _KW:  # longest keyword first
@@ -365,12 +349,8 @@ def _merge_or_rename_dir(src_dir: str, dst_dir: str) -> tuple[int, int]:
     return (moved, removed)
 
 def normalise_top_level_folders(mods_root: str, folder_map: dict[str, str]) -> dict:
-    """
-    Ensure top-level folder names match desired casing and synonyms.
-    Creates missing targets, merges duplicates. Returns summary.
-    """
     renamed, merged, created = [], 0, 0
-    desired_names = set(folder_map.values()) | set(_NORMALISE_DIRS.values())
+    desired_names = set(folder_map.values()) | set(NORMALISE_DIRS.values())
 
     for name in sorted(desired_names):
         p = os.path.join(mods_root, name)
@@ -385,7 +365,7 @@ def normalise_top_level_folders(mods_root: str, folder_map: dict[str, str]) -> d
             existing.setdefault(_normalise_key(entry), []).append(entry)
 
     for key, names in existing.items():
-        target = _NORMALISE_DIRS.get(key)
+        target = NORMALISE_DIRS.get(key)
         if not target:
             for d in desired_names:
                 if _normalise_key(d) == key:
@@ -555,59 +535,48 @@ def undo_last(mods_root: str, count: int | None = None) -> int:
 # === Section 4 — UI (Styles, Window, Widgets) ===============================
 
 class Sims4ModSorterApp(tk.Tk):
-    """Main application window."""
     def __init__(self):
         super().__init__()
         self.title(APP_NAME)
-        # Optional: set a sane initial size; users can resize freely.
-        self.geometry("1280x720")
+        self.geometry(INITIAL_GEOMETRY)  # from config
 
-        # ---------- State ----------
+        cfg = load_settings()
         self.items: list[FileItem] = []
         self._filtered_items: list[FileItem] | None = None
         self.folder_map: dict[str, str] = dict(DEFAULT_FOLDER_MAP)
 
-        # User config/state vars
-        cfg = load_settings()
+        # Vars with config fallbacks
         self.mods_root = tk.StringVar(value=cfg.get("mods_root", str(Path.home())))
         self.search_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Ready")
         self.summary_var = tk.StringVar(value="No plan yet")
         self.theme_var = tk.StringVar(value=cfg.get("theme_name", DEFAULT_THEME_NAME))
-        self.recurse_var = tk.BooleanVar(value=cfg.get("recurse", True))
-        self.ignore_exts_var = tk.StringVar(value=cfg.get("ignore_exts", ".txt .md .psd .png .jpg .jpeg"))
-        self.ignore_names_var = tk.StringVar(value=cfg.get("ignore_names", "readme license changelog"))
+        self.recurse_var = tk.BooleanVar(value=cfg.get("recurse", RECURSE_DEFAULT))
+        self.ignore_exts_var = tk.StringVar(value=cfg.get("ignore_exts", IGNORE_EXTENSIONS_DEFAULT))
+        self.ignore_names_var = tk.StringVar(value=cfg.get("ignore_names", IGNORE_NAME_CONTAINS_DEFAULT))
 
-        # Scan/log counters (live feedback)
+        # Scan/log counters…
         self.scan_started_at = 0.0
-        self.scan_total = 0
-        self.scan_done = 0
-        self.scan_ok = 0
-        self.scan_ignored = 0
-        self.scan_errors = 0
+        self.scan_total = self.scan_done = self.scan_ok = self.scan_ignored = self.scan_errors = 0
         self.scan_count_var = tk.StringVar(value="0 / 0")
         self.scan_ok_var    = tk.StringVar(value="0 OK")
         self.scan_ign_var   = tk.StringVar(value="0 Ignored")
         self.scan_err_var   = tk.StringVar(value="0 Errors")
         self.scan_eta_var   = tk.StringVar(value="ETA —")
         self.cur_file_var   = tk.StringVar(value="")
-        self.autoscroll_var = tk.BooleanVar(value=True)
+        self.autoscroll_var = tk.BooleanVar(value=cfg.get("log_autoscroll", LOG_AUTOSCROLL_DEFAULT))
 
-        # Sorting/columns UI state
+        # Sorting/columns
         self.columns_visible: list[str] = cfg.get("columns_visible", list(COLUMNS))
         self._sort_col: str | None = None
         self._sort_desc: bool = False
         self._respect_user_widths = False
 
-        # Detector order placeholder (kept for compatibility)
         self.detector_order: list[str] = cfg.get("detector_order", [])
 
-        # Build theme/styles and UI
         self.style = ttk.Style(self)
         self._apply_theme(self.theme_var.get())
         self._build_ui()
-
-        # Clamp initial sash position after first draw
         self.after(50, self._clamp_initial_layout)
 
     # --- Styling / theme -----------------------------------------------------
@@ -1352,3 +1321,4 @@ if __name__ == "__main__":
     # - Nuitka: use --windows-console-mode=disable
     # Running from source on Windows: use pythonw.exe instead of python.exe.
     main()
+
