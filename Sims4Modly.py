@@ -24,7 +24,7 @@ from modly.keywords_loader import load_keywords
 
 APP_NAME = "Sims 4 Modly"
 APP_ID = "sims4-modly"
-APP_VERSION = "1.0"
+APP_VERSION = "0.3.0"
 
 # User settings + move logs (editable; absolute or relative). Keep filenames short.
 SETTINGS_PATH = Path.home() / ".sims4_modly.json"
@@ -1324,5 +1324,6 @@ if __name__ == "__main__":
     # - Nuitka: use --windows-console-mode=disable
     # Running from source on Windows: use pythonw.exe instead of python.exe.
     main()
+
 
 
