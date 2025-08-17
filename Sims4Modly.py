@@ -665,9 +665,12 @@ class Sims4ModSorterApp(tk.Tk):
         xsb = ttk.Scrollbar(left, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscroll=ysb.set, xscroll=xsb.set)
 
-        for col in COLUMNS:
-            self.tree.heading(col, text=HEADERS.get(col, col), command=lambda c=col: self._sort_by(c))
-
+        # Default column widths (from config)
+        for col, w in DEFAULT_COLUMN_WIDTHS.items():
+            self.tree.column(
+                col, width=w, minwidth=40, stretch=False,
+                anchor=("w" if col in ("rel", "name", "target", "notes") else "center")
+            )
         # Default column widths (px). Minwidth is editable; stretch=False prevents tugging.
         defaults = {"inc": 28, "rel": 200, "name": 360, "ext": 70, "type": 160,
                     "size": 70, "target": 200, "notes": 360, "conf": 66}
@@ -1321,4 +1324,5 @@ if __name__ == "__main__":
     # - Nuitka: use --windows-console-mode=disable
     # Running from source on Windows: use pythonw.exe instead of python.exe.
     main()
+
 
