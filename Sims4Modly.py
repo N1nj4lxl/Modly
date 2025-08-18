@@ -421,6 +421,104 @@ _KW = sorted(((k.lower().strip(), v) for (k, v) in _KEYWORDS), key=lambda kv: (-
 def _canon(cat: str) -> str:
     return _CANON.get(cat, cat)
 
+# --- DBPF resource type → category hints (little-endian type IDs)
+# These are safe heuristics; we don't fully parse DBPF (fast).
+_RESOURCE_TYPE_HINTS = {
+    0x034AEECB: ("CAS Clothing",   "DBPF: CASP"),   # CAS part
+    0x015A1849: ("CAS Clothing",   "DBPF: GEOM"),   # geometry (often CAS)
+    0x3453CF95: ("CAS Clothing",   "DBPF: RLE2"),   # CAS textures
+    0x00B2D882: ("CAS Clothing",   "DBPF: RLE "),   # older texture chunk
+    0x319E4F1D: ("Build/Buy",      "DBPF: OBJD"),   # object definition
+    0x01D10F34: ("Build/Buy",      "DBPF: MLOD"),   # model LOD
+    0x220557DA: ("Build/Buy",      "DBPF: STBL"),   # strings (neutral, but common)
+    0x0333406C: ("Gameplay Tuning","DBPF: XML"),    # tuning xml
+    0xEBCF4E9B: ("Gameplay Tuning","DBPF: SIMDATA"),# tuning simdata
+    0xA0F3F4D4: ("Animation",      "DBPF: CLIP"),   # animation clip
+}
+
+# Precompute the byte sequences we want to find (little-endian)
+_RESOURCE_TYPE_BYTES = {t: t.to_bytes(4, "little") for t in _RESOURCE_TYPE_HINTS.keys()}
+
+def _scan_for_types_dbpf(path: str, head_bytes: int = 256 * 1024, tail_bytes: int = 128 * 1024) -> set[int]:
+    """
+    Fast string-scan for known DBPF type IDs in the head and tail of a file.
+    We avoid full DBPF parsing for speed and robustness.
+    Returns a set of int type IDs we detected.
+    """
+    hits: set[int] = set()
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            # Read head
+            chunk = f.read(min(head_bytes, size))
+            for tid, sig in _RESOURCE_TYPE_BYTES.items():
+                if sig in chunk:
+                    hits.add(tid)
+            # Read tail
+            if size > tail_bytes:
+                f.seek(max(0, size - tail_bytes))
+                chunk = f.read(tail_bytes)
+                for tid, sig in _RESOURCE_TYPE_BYTES.items():
+                    if sig in chunk:
+                        hits.add(tid)
+    except Exception:
+        pass
+    return hits
+
+# Folder-name hints: if the file already lives under a meaningful folder,
+# gently raise confidence toward the matching category.
+_FOLDER_HINTS = {
+    "mcc": "Script Mod",
+    "ui cheats": "Script Mod",
+    "script": "Script Mod",
+    "framework": "Utilities",
+    "utility": "Utilities",
+    "utilities": "Utilities",
+    "cas": "CAS Clothing",  # umbrella CAS bucket
+    "create a sim": "CAS Clothing",
+    "hair": "CAS Hair",
+    "makeup": "CAS Accessories",
+    "eyes": "CAS Accessories",
+    "tattoo": "CAS Accessories",
+    "accessor": "CAS Accessories",
+    "build": "Build/Buy",
+    "buy": "Build/Buy",
+    "override": "Overrides",
+    "overrides": "Overrides",
+    "animation": "Animation",
+    "animations": "Animation",
+    "pose": "Animation",
+    "poses": "Animation",
+    "gameplay": "Gameplay Mods",
+    "tuning": "Gameplay Tuning",
+}
+
+def _boost_from_parent_dirs(relpath: str, cur: tuple[str, float, str]) -> tuple[str, float, str]:
+    """
+    If parent directories look meaningful, nudge the classification up to 0.75 confidence.
+    Never overrides a stronger (>=0.80) decision.
+    """
+    cat, conf, notes = cur
+    if conf >= 0.80:
+        return cur
+    try:
+        parts = [p.strip().lower() for p in os.path.dirname(relpath).split(os.sep) if p.strip()]
+    except Exception:
+        parts = []
+    hint = None
+    for p in parts[::-1]:  # nearest parent first
+        for key, tgt in _FOLDER_HINTS.items():
+            if key in p:
+                hint = tgt
+                break
+        if hint:
+            break
+    if hint and (cat == "Unknown" or conf < 0.75):
+        cat = _CANON.get(hint.lower(), hint)
+        conf = 0.75
+        notes = (notes + f"; parent hint: {hint}").strip("; ")
+    return (cat, conf, notes)
+
 def guess_type_for_name(name: str, ext: str) -> tuple[str, float, str]:
     """
     Tuple-aware keyword detector:
@@ -450,29 +548,42 @@ def _keywords_hit(name_lower: str, keys: list[str]) -> list[str]:
 # Note: This is intentionally shallow. You can increase bytes to read if needed.
 def guess_type_binary(path: str, current: tuple[str, float, str]) -> tuple[str, float, str]:
     """
-    Peek inside DBPF to nudge confidence/categories for CAS / BuildBuy / Tuning.
-    Reads small slices – safe even on large files.
+    Deeper-but-fast DBPF probe: looks for known resource type IDs anywhere in
+    the head/tail of the package. This catches CASP/OBJD/XML/CLIP, etc.
     """
     cat, conf, notes = current
+    if not path.lower().endswith(".package"):
+        return current
     try:
-        if not path.lower().endswith(".package"):
-            return current
         with open(path, "rb") as f:
             if f.read(4) != b"DBPF":
                 return current
-            f.seek(0x18)  # DBPF index offset (heuristic)
-            idx_off = struct.unpack("<I", f.read(4))[0]
-            f.seek(idx_off)
-            blob = f.read(64 * 5)  # TWEAKABLE read window (min 256, max a few KB)
-            # crude content hints
-            if b"CASP" in blob or b"C A S " in blob:
-                return ("CAS Clothing", max(conf, 0.8), (notes + "; DBPF: CAS").strip("; "))
-            if b"OBJD" in blob or b"MODL" in blob:
-                return ("Build/Buy", max(conf, 0.8), (notes + "; DBPF: BuildBuy").strip("; "))
-            if b"ITUN" in blob or b"XML " in blob:
-                return ("Gameplay Tuning", max(conf, 0.8), (notes + "; DBPF: Tuning").strip("; "))
     except Exception:
         return current
+
+    hits = _scan_for_types_dbpf(path)
+    if not hits:
+        return current
+
+    # Prioritise the strongest semantic hits
+    best_cat = None
+    best_note = None
+    # preference order
+    order = [
+        0x034AEECB, 0x319E4F1D, 0x0333406C, 0xEBCF4E9B, 0xA0F3F4D4,
+        0x015A1849, 0x3453CF95, 0x00B2D882, 0x220557DA,
+    ]
+    for tid in order:
+        if tid in hits:
+            best_cat, best_note = _RESOURCE_TYPE_HINTS[tid]
+            break
+
+    if best_cat:
+        # Raise to strong confidence if category differs or current is weak
+        new_conf = max(conf, 0.85 if best_cat != cat else 0.80)
+        new_notes = (notes + f"; {best_note}").strip("; ")
+        return (best_cat, new_conf, new_notes)
+
     return current
 
 # ---- Pluggable detector pipeline
@@ -641,6 +752,8 @@ def scan_folder(root: str,
                 fpath, fname, ext, order=detector_order or DEFAULT_DETECTOR_ORDER,
                 enable_binary=use_binary_scan
             )
+            rel = os.path.relpath(fpath, root)
+            cat, conf, notes = _boost_from_parent_dirs(rel, (cat, conf, notes))
             if disabled:
                 notes = (notes + "; disabled (.off)").strip("; ")
 
