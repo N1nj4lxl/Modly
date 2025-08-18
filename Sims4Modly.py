@@ -65,12 +65,16 @@ FOLDER_PRESETS = {
 # -------------------------
 
 THEMES: dict[str, dict[str, str]] = {
-    # Original set
-    "Dark Mode":             {"bg": "#111316", "fg": "#E6E6E6", "alt": "#161A1E", "accent": "#4C8BF5", "sel": "#2A2F3A"},
-    "Slightly Dark":         {"bg": "#14161a", "fg": "#EAEAEA", "alt": "#1b1e24", "accent": "#6AA2FF", "sel": "#2f3642"},
-    "Light Mode":            {"bg": "#FAFAFA", "fg": "#1f2328", "alt": "#FFFFFF", "accent": "#316DCA", "sel": "#E8F0FE"},
-    "High Contrast":         {"bg": "#000000", "fg": "#FFFFFF", "alt": "#000000", "accent": "#FFD400", "sel": "#333333"},
-    "Pink Holiday":          {"bg": "#1a1216", "fg": "#FFE7F3", "alt": "#23171e", "accent": "#FF5BA6", "sel": "#3a1f2c"},
+    "Dark Mode":        {"bg": "#111316", "fg": "#E6E6E6", "alt": "#161A1E", "accent": "#4C8BF5", "sel": "#2A2F3A"},
+    "Slightly Dark":    {"bg": "#14161a", "fg": "#EAEAEA", "alt": "#1b1e24", "accent": "#6AA2FF", "sel": "#2f3642"},
+    "Light Mode":       {"bg": "#FAFAFA", "fg": "#1f2328", "alt": "#FFFFFF", "accent": "#316DCA", "sel": "#E8F0FE"},
+    "High Contrast":    {"bg": "#000000", "fg": "#FFFFFF", "alt": "#000000", "accent": "#FFD400", "sel": "#333333"},
+    "Pink Holiday":     {"bg": "#1a1216", "fg": "#FFE7F3", "alt": "#23171e", "accent": "#FF5BA6", "sel": "#3a1f2c"},
+    "Gothic":           {"bg": "#231128", "fg": "#F4EFFA", "alt": "#2F1B3A", "accent": "#C9A227", "sel": "#412454"},
+    "Emo":              {"bg": "#000000", "fg": "#F1F1F1", "alt": "#15161A", "accent": "#FF2D95", "sel": "#2E3552"},
+    "Melon":            {"bg": "#D9EF62", "fg": "#1F2328", "alt": "#A3CF5A", "accent": "#FF4044", "sel": "#FF7176"},
+    "King":             {"bg": "#0B132B", "fg": "#E6EDF3", "alt": "#101B33", "accent": "#F2C94C", "sel": "#1B2A4A"},
+    "Jester":           {"bg": "#0F0A14", "fg": "#EDECF5", "alt": "#161021", "accent": "#FF4D6D", "sel": "#26152F"},
 }
 
 # =========================
@@ -1057,13 +1061,23 @@ class Sims4ModSorterApp(tk.Tk):
         # Build UI
         self._build_style()
         self._build_ui()
-        self.after(50, self._clamp_initial_layout)
         self._build_settings_overlay()
         self._build_collision_overlay()
+        self.after(150, self._apply_launch_layout)
 
-        # Global binds
-        self.bind("<Escape>", lambda e: self.toggle_settings(False))
-        self.geometry("1280x700")
+        # geometry (restore if saved, else a sensible default)
+        g = load_settings().get("geometry") or "1400x820+120+80"
+        self.geometry(g)
+        self.minsize(1100, 680)  # floor so the tree never collapses
+
+        # first clamp after everything exists
+        self.after(50, self._clamp_initial_layout)
+
+        # keep panes sensible while the user resizes
+        self.bind("<Configure>", lambda e: self._on_resize())
+
+        # save geometry on close
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ---- Style / theme
 
@@ -1194,13 +1208,20 @@ class Sims4ModSorterApp(tk.Tk):
 
         # Left pane (Tree)
         left = ttk.Frame(self.mid, width=980)
-        left.pack_propagate(False)                 # prevent auto-expansion to sum of column widths
+        left.pack_propagate(False)
         self.mid.add(left, weight=5)
 
         # Right pane (selection/editor)
-        right = ttk.Frame(self.mid, width=300)
+        right = ttk.Frame(self.mid, width=320)
         right.pack_propagate(False)
         self.mid.add(right, weight=0)
+
+        # NEW: enforce min widths (ttk.PanedWindow needs paneconfigure, not add(..., minsize=...))
+        try:
+            self.mid.paneconfigure(left,  minsize=720)   # <- tweak if you want; floor for tree area
+            self.mid.paneconfigure(right, minsize=280)   # <- right panel never shrinks too small
+        except tk.TclError:
+            pass
 
         # --- Tree + scrollbars ---------------------------------------------------
         # visible columns preference
@@ -1659,6 +1680,97 @@ class Sims4ModSorterApp(tk.Tk):
         except Exception:
             pass
 
+    def _apply_launch_layout(self):
+        """One-shot: set the sash to give the tree most of the space and size columns."""
+        try:
+            if not hasattr(self, "mid") or not self.mid.winfo_ismapped():
+                self.after(80, self._apply_launch_layout); return
+            self.update_idletasks()
+
+            total = self.mid.winfo_width()
+            if total < 800:  # window not fully sized yet; try again shortly
+                self.after(80, self._apply_launch_layout); return
+
+            # Give the right panel a sensible fixed width and the rest to the tree
+            right_w = 320  # tweak if you want the right side narrower/wider
+            try:
+                self.mid.sashpos(0, max(700, total - right_w))
+            except tk.TclError:
+                pass
+
+            # Now set default column widths so "Target Folder" is visible by default
+            self._set_tree_default_widths()
+        finally:
+            # Optional: also run the autosizer once (it shares spare space cleanly)
+            self.after(1, self._autosize_wide_columns)
+
+
+    def _set_tree_default_widths(self):
+        """Initial column widths as percentages so the tree looks 'right' on open."""
+        if not hasattr(self, "tree") or not self.tree.winfo_ismapped():
+            return
+        self.update_idletasks()
+        tw = self.tree.winfo_width()
+        if tw <= 0:
+            return
+
+        # Only adjust if these columns exist in your current view
+        pct = {
+            "rel":    0.20,  # Folder
+            "name":   0.36,  # File
+            "ext":    0.07,  # Ext
+            "type":   0.12,  # Type
+            "mb":     0.08,  # MB
+            "target": 0.17,  # Target Folder
+        }
+        cols = set(self.tree["columns"])
+
+        # Narrow fixed columns
+        if "inc" in cols:
+            self.tree.column("inc", width=24, stretch=False)
+
+        # Apply percentages
+        for col, p in pct.items():
+            if col in cols:
+                self.tree.column(col, width=int(tw * p), stretch=False)
+
+    def _clamp_initial_layout(self):
+        if not hasattr(self, "mid") or not self.mid.winfo_ismapped():
+            return
+        self.update_idletasks()
+        total = self.mid.winfo_width()
+        if total <= 0:
+            return
+        right_w = max(300, min(420, int(total * 0.25)))
+        try:
+            self.mid.sashpos(0, max(700, total - right_w))
+        except tk.TclError:
+            pass
+        self.after(1, self._autosize_wide_columns)
+
+    def _on_resize(self):
+        if getattr(self, "_rsz_after", None):
+            try: self.after_cancel(self._rsz_after)
+            except Exception: pass
+        self._rsz_after = self.after(80, self._clamp_initial_layout)
+
+    def _autosize_wide_columns(self):
+        if not hasattr(self, "tree") or not self.tree.winfo_ismapped():
+            return
+        self.update_idletasks()
+        total = self.tree.winfo_width()
+        if total <= 0:
+            return
+        widths = {c: int(self.tree.column(c, "width")) for c in self.tree["columns"]}
+        flex = [c for c in ("name", "notes", "rel", "target") if c in widths]
+        fixed = sum(widths[c] for c in self.tree["columns"] if c not in flex)
+        want  = total - fixed - 20
+        if want <= 0 or not flex:
+            return
+        share = max(1, want // len(flex))
+        for c in flex:
+            self.tree.column(c, width=max(widths[c], share))
+
     # ----- Detection order drag & drop -----
     def _det_drag_begin(self, event):
         self._det_drag_index = self.lb_det.nearest(event.y)
@@ -1677,6 +1789,12 @@ class Sims4ModSorterApp(tk.Tk):
 
     def _det_drag_drop(self, _event):
         self._det_drag_index = None
+
+    def _on_close(self):
+        cfg = load_settings()
+        cfg["geometry"] = self.geometry()
+        save_settings(cfg)
+        self.destroy()
 
 # =========================
 # Section 5 — Wiring & Handlers (after UI is built)
